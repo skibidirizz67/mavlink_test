@@ -3,11 +3,67 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <time.h>
 
 #include <mavlink/common/mavlink.h>
 
 const char *path = "/dev/ttyAMA0";
 const speed_t baud = B921600;
+const uint64_t heartbeat_interval_nsec = 1000000000ULL; // 1000 ms
+
+static void send_heartbeat(int fd) {
+    mavlink_message_t msg;
+    static uint8_t *buf[1024];
+
+    uint8_t system_id = 255; // `GCS typically use a default system ID up around 255`
+    uint8_t component_id = MAV_COMP_ID_ONBOARD_COMPUTER; // `By convention components have a default ID using the value as defined in MAV_COMPONENT`
+    uint8_t type = MAV_TYPE_GCS; // from MAV_TYPE
+    uint8_t autopilot = MAV_AUTOPILOT_INVALID; // `No valid autopilot, e.g. a GCS or other MAVLink component`
+    uint8_t base_mode = 0; // couldn't find reliable source of what GCS should set
+    uint8_t custom_mode = 0; // couldn't find reliable source of what GCS should set
+    uint8_t system_status = 0; // couldn't find reliable source of what GCS should set
+
+    mavlink_msg_heartbeat_pack(system_id, component_id, &msg, type, autopilot, base_mode, custom_mode, system_status);
+
+    uint16_t msg_size = mavlink_msg_to_send_buffer((uint8_t *)buf, &msg);
+
+    ssize_t bytes_written = write(fd, &buf, msg_size);
+
+    if (!bytes_written) {
+        perror("write");
+    }
+    else if (bytes_written < msg_size) {
+        fprintf(stderr, "warning: %zd bytes was written, but requested number is %u", bytes_written, msg_size);
+    }
+}
+
+static void *heartbeat_routine(void *arg) {
+    struct timespec t1, t2;
+    uint64_t elapsed_nsec;
+    int fd = *(int *)arg;
+
+    while (1) {
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+
+        send_heartbeat(fd);
+
+        clock_gettime(CLOCK_MONOTONIC, &t2);
+        
+        elapsed_nsec = (uint64_t)(t2.tv_sec - t1.tv_sec) * 1000000000ULL +
+            (uint64_t)(t2.tv_nsec - t1.tv_nsec);
+        
+        if (elapsed_nsec < heartbeat_interval_nsec) {
+            uint64_t sleep_nsec = heartbeat_interval_nsec - elapsed_nsec;
+            struct timespec ts = {
+                .tv_sec = sleep_nsec / 1000000000ULL,
+                .tv_nsec = sleep_nsec % 1000000000ULL,
+            };
+            nanosleep(&ts, NULL);
+        }
+    }
+
+    return NULL;
+}
 
 int main() {
     int fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK);
