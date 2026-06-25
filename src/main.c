@@ -9,7 +9,7 @@
 
 #include <mavlink/common/mavlink.h>
 
-#define WRITE_BUF_SIZE 1024
+#define MAVLINK_MAX_PKT_LEN 280
 
 const char *path = "/dev/ttyAMA0";
 const speed_t baud = B921600;
@@ -17,7 +17,7 @@ const uint64_t heartbeat_interval_nsec = 1000000000ULL; // 1000 ms
 
 static void send_heartbeat(int fd) {
     mavlink_message_t msg;
-    static uint8_t *buf[WRITE_BUF_SIZE];
+    static uint8_t *buf[MAVLINK_MAX_PKT_LEN];
 
     uint8_t system_id = 255; // `GCS typically use a default system ID up around 255`
     uint8_t component_id = MAV_COMP_ID_ONBOARD_COMPUTER; // `By convention components have a default ID using the value as defined in MAV_COMPONENT`
@@ -115,6 +115,50 @@ int tty_init() {
     return fd;
 }
 
+void message_hexdump(const mavlink_message_t *msg)
+{
+    uint8_t buf[MAVLINK_MAX_PKT_LEN];
+    uint16_t msg_size = mavlink_msg_to_send_buffer(buf, msg);
+
+    printf("msgid=%u len=%u: ", msg->msgid, msg_size);
+    for (uint16_t i = 0; i < msg_size; i++) {
+        printf("%02X ", buf[i]);
+    }
+    printf("\n");
+}
+
+void message_decode_and_print(const mavlink_message_t *msg) {
+    switch (msg->msgid) {
+        case MAVLINK_MSG_ID_HEARTBEAT: {
+            mavlink_heartbeat_t hb;
+            mavlink_msg_heartbeat_decode(msg, &hb);
+            printf("HEARTBEAT: type=%u autopilot=%u base_mode=%u custom_mode=%u system_status=%u\n\n",
+                   hb.type,
+                   hb.autopilot,
+                   hb.base_mode,
+                   hb.custom_mode,
+                   hb.system_status);
+        } break;
+        default: {
+            message_hexdump(msg);
+        } break;
+    }
+}
+
+void message_receive(int fd) {
+    mavlink_status_t status;
+    mavlink_message_t msg;
+    int chan = MAVLINK_COMM_0;
+
+    ssize_t n;
+    uint8_t byte;
+    while ((n = read(fd, &byte, 1)) > 0) {
+        if (mavlink_parse_char(chan, byte, &msg, &status)) {
+            message_decode_and_print(&msg);
+        }
+    }
+}
+
 int main() {
     int fd = tty_init();
     if (fd < 0) {
@@ -122,13 +166,16 @@ int main() {
     }
 
     pthread_t heartbeat_thread;
-    
     int err_num = pthread_create(&heartbeat_thread, NULL, heartbeat_routine, (void *)&fd);
     if (err_num != 0) {
         fprintf(stderr, "pthread_create: could not create a thread (error %d)", err_num);
     }
+    printf("heartbeat thread launched\n");
 
-    pthread_join(heartbeat_thread, NULL);
+    printf("listening for incoming messages...\n\n");
+    while (1) {
+        message_receive(fd);
+    }
 
     close(fd);
     return 0;
