@@ -4,8 +4,12 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <time.h>
+#include <pthread.h>
+#include <stdlib.h>
 
 #include <mavlink/common/mavlink.h>
+
+#define WRITE_BUF_SIZE 1024
 
 const char *path = "/dev/ttyAMA0";
 const speed_t baud = B921600;
@@ -13,7 +17,7 @@ const uint64_t heartbeat_interval_nsec = 1000000000ULL; // 1000 ms
 
 static void send_heartbeat(int fd) {
     mavlink_message_t msg;
-    static uint8_t *buf[1024];
+    static uint8_t *buf[WRITE_BUF_SIZE];
 
     uint8_t system_id = 255; // `GCS typically use a default system ID up around 255`
     uint8_t component_id = MAV_COMP_ID_ONBOARD_COMPUTER; // `By convention components have a default ID using the value as defined in MAV_COMPONENT`
@@ -29,7 +33,7 @@ static void send_heartbeat(int fd) {
 
     ssize_t bytes_written = write(fd, &buf, msg_size);
 
-    if (!bytes_written) {
+    if (bytes_written <= 0) {
         perror("write");
     }
     else if (bytes_written < msg_size) {
@@ -65,7 +69,7 @@ static void *heartbeat_routine(void *arg) {
     return NULL;
 }
 
-int main() {
+int tty_init() {
     int fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) {
         perror("open");
@@ -108,19 +112,23 @@ int main() {
         return -1;
     }
 
-    mavlink_status_t status;
-    mavlink_message_t msg;
-    int chan = MAVLINK_COMM_0;
+    return fd;
+}
 
-    ssize_t n;
-    uint8_t byte;
-    while (1) {
-        while ((n = read(fd, &byte, 1)) > 0) {
-            if (mavlink_parse_char(chan, byte, &msg, &status)) {
-                printf("received message\n");
-            }
-        }
+int main() {
+    int fd = tty_init();
+    if (fd < 0) {
+        return 1;
     }
+
+    pthread_t heartbeat_thread;
+    
+    int err_num = pthread_create(&heartbeat_thread, NULL, heartbeat_routine, (void *)&fd);
+    if (err_num != 0) {
+        fprintf(stderr, "pthread_create: could not create a thread (error %d)", err_num);
+    }
+
+    pthread_join(heartbeat_thread, NULL);
 
     close(fd);
     return 0;
